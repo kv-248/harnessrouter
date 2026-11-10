@@ -72,3 +72,43 @@ def test_the_comment_a_string_holds_stays_text_for_the_row_limit():
     out, added = with_limit("SELECT '--' AS a", 10)
     assert added and out.endswith("LIMIT 10") and "'--'" in out
     assert "--" not in _strip("SELECT '--' AS a")
+
+
+def test_a_postgres_line_comment_is_read_when_the_row_cap_is_decided(monkeypatch):
+    """Postgres starts a `--` comment with or without a space after it, and the read-only gate reads
+    it that way. The row cap used MySQL's rule (whitespace required), so a comment glued to a real
+    limit hid it and a second LIMIT was appended — `LIMIT 10--keep` then `LIMIT n`, which Postgres
+    rejects, so the query never ran — while a comment that only looked like a limit (`--LIMIT 1`)
+    was taken for one, and an unbounded statement was sent with no cap at all. MySQL still needs the
+    space: there `--LIMIT` is arithmetic and is the statement's own limit."""
+    import asyncio
+    import sql_plane
+
+    seen = {}
+
+    async def fake(dsn, sql, timeout, max_rows):
+        seen["sql"] = sql
+        return {"columns": ["x"], "rows": [[1]], "row_count": 1, "truncated": False}
+
+    monkeypatch.setattr(sql_plane, "_pg_query", fake)
+
+    sql = "SELECT * FROM t LIMIT 10--keep"
+    asyncio.run(sql_plane.run_query("postgres", "", sql, max_rows=500))
+    assert seen["sql"] == sql, seen["sql"]
+
+    sql = "SELECT * FROM t FETCH FIRST 4 ROWS ONLY--cap"
+    asyncio.run(sql_plane.run_query("postgres", "", sql, max_rows=500))
+    assert seen["sql"] == sql, seen["sql"]
+
+    sql = "SELECT * FROM t LIMIT 10--c\nOFFSET 2"
+    asyncio.run(sql_plane.run_query("postgres", "", sql, max_rows=500))
+    assert seen["sql"] == sql, seen["sql"]
+
+    sql = "SELECT * FROM t--LIMIT 1"
+    asyncio.run(sql_plane.run_query("postgres", "", sql, max_rows=500))
+    assert seen["sql"] == f"{sql}\nLIMIT 501", seen["sql"]
+
+    monkeypatch.setattr(sql_plane, "_mysql_query", fake)
+    sql = "SELECT * FROM t--LIMIT 1"
+    asyncio.run(sql_plane.run_query("mysql", "", sql, max_rows=500))
+    assert seen["sql"] == sql, seen["sql"]
