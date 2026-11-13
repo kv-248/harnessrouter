@@ -741,6 +741,41 @@ def test_hindsight_lists_everything_a_person_has_to_see_to_forget_it(wired):
     assert [r["type"] for r in run(h.list("m", {"limit": 2, "cursor": first["next"]}))["records"]][-1] == "fact"
 
 
+def _facts_by_state(units):
+    """A Hindsight bank whose only records are these facts. `state=valid` is the active list; no state is every one."""
+    def answer(method, path, params, body):
+        if path == BANK + "/memories/list":
+            rows = [u for u in units if u["state"] == "valid"] if params.get("state") == "valid" else list(units)
+            off, size = int(params.get("offset") or 0), int(params.get("limit") or 50)
+            return {"items": rows[off:off + size], "total": len(rows)}
+        if path in (BANK + "/entities", BANK + "/documents"):
+            return {"items": [], "total": 0}
+        return {}
+    return answer
+
+
+def test_hindsight_lists_a_forgotten_fact_when_the_list_asks_for_every_state(wired):
+    """The console's tree reads include=all, a page at a time, so a person can see what was forgotten or replaced.
+    That list's fact section was only as long as the facts still active: the page is the list with no state, and
+    the cursor stopped at the count taken with state=valid. A bank whose facts are all forgotten came back empty,
+    and a forgotten fact past the active count never had a next page."""
+    forgotten = {"id": "u_old", "text": "the title was Wren", "state": "invalidated", "fact_type": "world"}
+    active = {"id": "u_new", "text": "the title is Wren", "state": "valid", "fact_type": "world"}
+    wired(memory_hindsight, _facts_by_state([forgotten]))
+    h = memory_hindsight.Hindsight("http://vendor.test")
+    only = run(h.list("m", {"include": "all", "limit": 50}))
+    assert [r["id"] for r in only["records"]] == ["u_old"] and only["records"][0]["status"] == "forgotten"
+    wired(memory_hindsight, _facts_by_state([forgotten, active]))
+    h = memory_hindsight.Hindsight("http://vendor.test")
+    first = run(h.list("m", {"include": "all", "limit": 1}))
+    assert [r["id"] for r in first["records"]] == ["u_old"] and first["next"] == "1"
+    second = run(h.list("m", {"include": "all", "limit": 1, "cursor": first["next"]}))
+    assert [r["id"] for r in second["records"]] == ["u_new"] and second["next"] is None
+    # the active list is still only the facts that hold, and it does not invent a page past them
+    held = run(h.list("m", {"limit": 1}))
+    assert [r["id"] for r in held["records"]] == ["u_new"] and held["next"] is None
+
+
 def test_an_observation_names_the_records_it_was_drawn_from(wired):
     """Measured 11-06: 172 of a bank's 211 facts were observations, with no document and no entities, so they drew as
     loose dots. Each names its sources; a stated record's own fact is read as that record."""

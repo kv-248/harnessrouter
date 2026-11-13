@@ -605,8 +605,11 @@ class Hindsight(mp.Provider):
         to be able to see to forget it."""
         rows: list[dict] = []
         start = 0
+        # The fact page omits state when every state was asked for, so the span has to be that
+        # same list. Counted with state=valid, the cursor stops at the facts still active.
+        include_all = req.get("include") == "all"
         for kind in (["episode"], ["entity"], ["fact"]):
-            total = await self._kind_total(mid, kind[0])
+            total = await self._kind_total(mid, kind[0], include_all)
             end = start + total
             if at + size > start and at < end and len(rows) < size:
                 offset, room = max(at - start, 0), size - len(rows)
@@ -616,13 +619,16 @@ class Hindsight(mp.Provider):
             start = end
         return {"records": rows, "next": str(at + size) if at + size < start else None}
 
-    async def _kind_total(self, mid, kind) -> int:
+    async def _kind_total(self, mid, kind, include_all: bool = False) -> int:
         if kind == "entity":
             r = await self._call("GET", self._bank(mid) + "/entities", params={"limit": 1})
         elif kind == "episode":
             r = await self._call("GET", self._bank(mid) + "/documents", params={"tags": "t:episode", "limit": 1})
         else:
-            r = await self._call("GET", self._bank(mid) + "/memories/list", params={"limit": 1, "state": ACTIVE})
+            params = {"limit": 1}
+            if not include_all:
+                params["state"] = ACTIVE
+            r = await self._call("GET", self._bank(mid) + "/memories/list", params=params)
         return int((r.json() or {}).get("total") or 0) if r.status_code == 200 else 0
 
     async def recall(self, mid, req):
