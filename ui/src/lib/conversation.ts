@@ -109,7 +109,7 @@ export interface AsstMsg { role: 'assistant'; blocks: Block[]; files: RespFile[]
   incompleteReason?: string;
   /** The question a turn ended on (Tasks 3.2), while it is still the person's to answer. */
   inputRequest?: InputRequest;
-  /** the server's own sentence for a refusal, when it sent one (shown beside the reason) */
+  /** the sentence for a refusal or an escalation, from the turn's handoff (shown beside the reason) */
   incompleteDetail?: string;
   /** Seconds this turn took, when the gateway kept it. */
   elapsed?: number;
@@ -165,6 +165,35 @@ export function turnSpan(t: Pick<SessionTurn, 'created_at' | 'completed_at'>): n
     ? Math.round(b - a) : undefined;
 }
 
+/** A probability from a handoff, as two decimals. A missing one is a question mark: an escalation the
+ *  model asked for carries no judgment. */
+function probText(x: unknown): string {
+  return typeof x === 'number' ? x.toFixed(2) : '?';
+}
+
+/** The sentence for a run that handed off (a refusal or an escalation): the step, and the judgment
+ *  when the harness measured one. The gateway sends this object as `handoff` on a saved turn and as
+ *  `incomplete_details.handoff` on the live response. `reason` is the turn's incomplete_reason, used
+ *  when the object itself does not name one. */
+function handoffSentence(handoff: unknown, reason?: string): string | undefined {
+  if (!handoff || typeof handoff !== 'object' || Array.isArray(handoff)) return undefined;
+  const h = handoff as Record<string, unknown>;
+  let said = `It handed off at step ${String(h.step ?? '?')}: ${String(h.reason ?? reason ?? '')}.`;
+  if (typeof h.weakest === 'number' || typeof h.threshold === 'number') {
+    said += ` The weakest judgment was ${probText(h.weakest)} against a threshold of ${probText(h.threshold)}`;
+    said += h.risk ? ` on a ${String(h.risk)} action` : '';
+    said += '.';
+  }
+  return said;
+}
+
+/** The sentence an incomplete response carries: the handoff, or a `detail` string when that is what
+ *  arrived. The two live paths and a reload have to agree. */
+function incompleteDetailOf(inc: { reason?: string; detail?: string; handoff?: unknown } | null | undefined): string | undefined {
+  if (!inc) return undefined;
+  return handoffSentence(inc.handoff, inc.reason) || (typeof inc.detail === 'string' && inc.detail ? inc.detail : undefined);
+}
+
 export function msgsFromTurns(turns: SessionTurn[]): { msgs: Msg[]; running: boolean } {
   const m: Msg[] = [];
   let running = false;
@@ -187,7 +216,10 @@ export function msgsFromTurns(turns: SessionTurn[]): { msgs: Msg[]; running: boo
     if (st === 'running') running = true;
     m.push({ role: 'assistant', blocks, files: t.files || [], status: st,
       incompleteReason: (t as { incomplete_reason?: string }).incomplete_reason || undefined,
-      incompleteDetail: (t as { incomplete_detail?: string }).incomplete_detail || undefined,
+      // the gateway names the handoff `handoff`, not `incomplete_detail`; a sentence in the older
+      // field is still shown when that is all the record has
+      incompleteDetail: handoffSentence((t as { handoff?: unknown }).handoff, (t as { incomplete_reason?: string }).incomplete_reason)
+        || (t as { incomplete_detail?: string }).incomplete_detail || undefined,
       inputRequest: (t as { input_request?: InputRequest }).input_request || undefined,
       elapsed: typeof t.elapsed === 'number' ? t.elapsed : undefined,
       ...(st !== 'running' && turnSpan(t) !== undefined ? { span: turnSpan(t) } : {}), ...imported });
@@ -387,11 +419,11 @@ function applyBusEvent(sid: string, responseId: string, ev: Record<string, unkno
     case 'response.completed':
       busUpdateLast(sid, (a) => { a.status = 'done'; }); setConvState(sid, { busy: false, prevId: responseId, firstTurn: false }); break;
     case 'response.incomplete': {
-      // the event carries why (max_steps | timeout | interrupted) and the server's sentence when it
-      // sent one; the stored record has the same fields, so a reload agrees with what the live turn
-      // showed
-      const inc = (ev.response as { incomplete_details?: { reason?: string; detail?: string } } | undefined)?.incomplete_details;
-      busUpdateLast(sid, (a) => { a.status = 'incomplete'; if (inc?.reason) a.incompleteReason = inc.reason; if (inc?.detail) a.incompleteDetail = inc.detail; a.inputRequest = inputRequestOf(ev.response); });
+      // the event carries why (max_steps | timeout | interrupted) and the handoff when the run
+      // stopped on one; the stored turn has the same fields, so a reload agrees with the live turn
+      const inc = (ev.response as { incomplete_details?: { reason?: string; detail?: string; handoff?: unknown } } | undefined)?.incomplete_details;
+      const said = incompleteDetailOf(inc);
+      busUpdateLast(sid, (a) => { a.status = 'incomplete'; if (inc?.reason) a.incompleteReason = inc.reason; if (said) a.incompleteDetail = said; a.inputRequest = inputRequestOf(ev.response); });
       setConvState(sid, { busy: false, prevId: responseId, firstTurn: false }); break;
     }
     case 'response.failed': {
@@ -868,15 +900,15 @@ export function useConversationTurn({ harnessId, sessionId, target, onRan, onSes
           onFile: (f) => updateLast((a) => { a.files = withFile(a.files, f); }),
           onError: (msg) => updateLast((a) => { a.blocks = withError(a.blocks, msg); }),
           onDone: (status, response) => {
-            // why an incomplete turn stopped (max_steps | timeout | interrupted) and the server's
-            // sentence ride on the terminal event's response object, the same fields the stored
-            // record carries
-            const inc = (response as { incomplete_details?: { reason?: string; detail?: string } } | undefined)?.incomplete_details;
+            // why an incomplete turn stopped (max_steps | timeout | interrupted) and its handoff
+            // ride on the terminal event's response object, the same fields the stored record carries
+            const inc = (response as { incomplete_details?: { reason?: string; detail?: string; handoff?: unknown } } | undefined)?.incomplete_details;
+            const said = incompleteDetailOf(inc);
             updateLast((a) => {
               a.status = status === 'completed' ? 'done'
                 : (['failed', 'cancelled', 'incomplete'].includes(status) ? status as AsstMsg['status'] : 'failed');
               if (status === 'incomplete' && inc?.reason) a.incompleteReason = inc.reason;
-              if (status === 'incomplete' && inc?.detail) a.incompleteDetail = inc.detail;
+              if (status === 'incomplete' && said) a.incompleteDetail = said;
               if (status === 'incomplete') a.inputRequest = inputRequestOf(response);
             });
             const sk = sessionId ?? sidRef.current;

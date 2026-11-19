@@ -191,6 +191,64 @@ describe('a turn’s state as the record says it', () => {
   });
 });
 
+// A run that stops on a refusal or an escalation carries the branch on incomplete_details.handoff
+// (and, once saved, on the turn as `handoff`). The console used to read a `detail` string the
+// gateway does not send, so the turn showed only the generic incomplete line: not where it handed
+// off, and not the judgment.
+const HANDOFF = { reason: 'no_confident_action', step: 7, weakest: 0.41, threshold: 0.7, risk: 'write' };
+const HANDED = 'It handed off at step 7: no_confident_action. The weakest judgment was 0.41 against a threshold of 0.70 on a write action.';
+const asstOf = (turns: SessionTurn[]) => C.msgsFromTurns(turns).msgs.find((m) => m.role === 'assistant') as AsstMsg;
+
+describe('a handoff shows where the run stopped', () => {
+  test('a saved turn’s handoff is the sentence, including the judgment it measured', () => {
+    const a = asstOf([turn({ status: 'incomplete', incomplete_reason: 'no_confident_action', handoff: HANDOFF } as never)]);
+    expect(a.status).toBe('incomplete');
+    expect(a.incompleteReason).toBe('no_confident_action');
+    expect(a.incompleteDetail).toBe(HANDED);
+  });
+
+  test('an escalation the model asked for names the step and leaves the judgment off', () => {
+    const a = asstOf([turn({ status: 'incomplete', incomplete_reason: 'needs_a_person', handoff: { reason: 'needs_a_person', step: 3 } } as never)]);
+    expect(a.incompleteDetail).toBe('It handed off at step 3: needs_a_person.');
+  });
+
+  test('no handoff invents nothing, and a sentence the record did send is kept', () => {
+    expect(asstOf([turn({ status: 'incomplete', incomplete_reason: 'max_steps', handoff: null } as never)]).incompleteDetail).toBeUndefined();
+    expect(asstOf([turn({ status: 'incomplete', incomplete_reason: 'max_steps' })]).incompleteDetail).toBeUndefined();
+    expect(asstOf([turn({ status: 'incomplete', incomplete_detail: 'Stopped on a refusal.' } as never)]).incompleteDetail).toBe('Stopped on a refusal.');
+  });
+
+  test('the live turn says the same thing the saved one will', async () => {
+    const sid = sidNew();
+    C.setConvState(sid, { msgs: [{ role: 'user', text: 'go' }, { role: 'assistant', blocks: [], files: [], status: 'running' }], busy: true, loaded: true });
+    await render(<Bus harness="h-hand" />);
+    await act(async () => {
+      mockChat.bus[0].onMsg({
+        session_id: sid, response_id: 'r1',
+        event: { type: 'response.incomplete', response: { incomplete_details: { reason: 'no_confident_action', handoff: HANDOFF } } },
+      });
+    });
+    const a = lastA(sid);
+    expect(a?.status).toBe('incomplete');
+    expect(a?.incompleteReason).toBe('no_confident_action');
+    expect(a?.incompleteDetail).toBe(HANDED);
+  });
+
+  test('the turn’s own stream says it too, not only the feed', async () => {
+    mockChat.stream.mockImplementation(async (_o: StreamOpts, h: StreamHandlers) => {
+      h.onCreated?.('r9');
+      h.onDone?.('incomplete', { incomplete_details: { reason: 'no_confident_action', handoff: HANDOFF } });
+      return 'r9';
+    });
+    await render(<Conv sid={null} />);
+    await act(async () => { await api.send('Ship it'); });
+    const a = [...api.msgs].reverse().find((m) => m.role === 'assistant') as AsstMsg;
+    expect(a.status).toBe('incomplete');
+    expect(a.incompleteReason).toBe('no_confident_action');
+    expect(a.incompleteDetail).toBe(HANDED);
+  });
+});
+
 describe('opening a task', () => {
   test('a record that cannot be read writes nothing and says so; Try again reads it', async () => {
     const sid = sidNew();

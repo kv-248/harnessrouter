@@ -1,7 +1,7 @@
 /** @jest-environment jsdom */
 import { fireEvent, render, screen } from '@testing-library/react';
-import { inputRequestOf, type InputRequest } from '@/lib/conversation';
-import { incompleteWhy, viewTurn } from './AgentTurns';
+import { inputRequestOf, msgsFromTurns, type InputRequest } from '@/lib/conversation';
+import { AgentTurns, incompleteWhy, viewTurn } from './AgentTurns';
 import { InputRequestCard, requestExpired } from './InputRequestCard';
 
 const ask = (over: Partial<InputRequest>): InputRequest => ({ id: 'inreq_1', kind: 'free_text', prompt: 'Which one?', ...over });
@@ -67,5 +67,16 @@ describe('the question a task ended on', () => {
     expect(inputRequestOf({ output: [{ type: 'message' }] })).toBeUndefined();
     expect(inputRequestOf(undefined)).toBeUndefined();
     expect(incompleteWhy('input_required')).toBe('Waiting for your answer.');
+  });
+});
+
+describe('a handoff on the turn', () => {
+  it('says where the run handed off, and on what judgment', () => {
+    const handoff = { reason: 'no_confident_action', step: 7, weakest: 0.41, threshold: 0.7, risk: 'write' };
+    const { msgs } = msgsFromTurns([{ id: 'r1', status: 'incomplete', user: 'ship it', assistant: '', tools: [], files: [],
+      incomplete_reason: 'no_confident_action', handoff } as never]);
+    const said = 'It handed off at step 7: no_confident_action. The weakest judgment was 0.41 against a threshold of 0.70 on a write action.';
+    render(<AgentTurns msgs={msgs} base={null} md={(t) => t} />);
+    expect(screen.getByText(said)).toBeTruthy();
   });
 });
