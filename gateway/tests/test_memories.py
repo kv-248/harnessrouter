@@ -526,6 +526,26 @@ def test_content_is_an_ordered_list_of_text_and_file_parts(people):
     assert caps["content"] == {"media": ["*/*"], "bytes": "referenced", "describes": []}
 
 
+def test_a_file_part_whose_name_a_header_cannot_spell_still_downloads(people):
+    """A response header is latin-1. The download quoted the file's stored name, so 报告.png raised
+    UnicodeEncodeError inside the server and the caller got a 500. The bytes are the file, and the
+    header is one a header can carry: an ASCII fallback plus the real name in filename*."""
+    ada, _ = people
+    mid = ada.post("/v1/memories", json={"provider": "fixture", "name": "Names"}).json()["id"]
+    png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 8
+    up = ada.post("/v1/files", files={"file": ("报告.png", png, "image/png")}, data={"purpose": "user_data"})
+    assert up.status_code == 200, up.text
+    rec = ada.post(f"/v1/memories/{mid}/records", json={"type": "note", "content": [
+        {"type": "file", "file": {"id": up.json()["id"]}}]})
+    assert rec.status_code == 200, rec.text
+    got = ada.get(f"/v1/memories/{mid}/records/{rec.json()['id']}/content/0")
+    assert got.status_code == 200 and got.content == png and got.headers["content-type"] == "image/png"
+    cd = got.headers["content-disposition"]
+    cd.encode("latin-1")
+    assert cd.startswith('attachment; filename="__.png"; filename*=UTF-8\'\'')
+    assert cd.split("filename*=UTF-8''", 1)[1] == app.urllib.parse.quote("报告.png", safe="")
+
+
 def test_a_memory_s_standing_records_are_read_newest_first_within_a_budget_from_that_memory_alone(people):
     ada, bob = people
     mk = lambda **b: ada.post("/v1/memories", json={"provider": "fixture", **b}).json()["id"]   # noqa: E731

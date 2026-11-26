@@ -22672,7 +22672,7 @@ class _MemoryCovers:
 memory_routes.install(app, _principal, uhp_error, BACKING.graph, _memory_file_meta, _memory_file_bytes,
                       on_grant=lambda org, principal: _memories_on_grant(org, principal), workspace_of=_plug_workspace,
                       used_by=_memory_used_by, engines_running=lambda org, ws: _memory_engines_running(org, ws),
-                      covers=_MemoryCovers())
+                      covers=_MemoryCovers(), disposition=_content_disposition)
 memory_plane.PROVIDERS.update({"mem0": memory_mem0.Mem0(), "graphiti": memory_graphiti.Graphiti(),
                                "hindsight": memory_hindsight.Hindsight(), "reme": memory_reme.ReMe()})
 _MEMORY_CHECKS = {"mem0": memory_mem0.check, "graphiti": memory_graphiti.check,

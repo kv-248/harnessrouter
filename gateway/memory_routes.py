@@ -27,20 +27,22 @@ _file_bytes = None          # app.py's reader of an uploaded file's bytes, bound
 _on_grant = None            # app.py's hook after a grant is written, bound by install()
 _used_by = None             # app.py's answer to which agents use each memory, bound by install()
 _engines_running = None     # app.py's answer to which engines are connected for a workspace and answering, bound by install()
+_disposition = None         # app.py's Content-Disposition builder, the one every other download uses
 
 
 def install(app, principal, uhp_error, graph, file_meta=None, file_bytes=None, on_grant=None, workspace_of=None,
-            used_by=None, engines_running=None, covers=None) -> None:
+            used_by=None, engines_running=None, covers=None, disposition=None) -> None:
     """Bind the gateway's principal resolver, error envelope, graph backing and file store, and
     mount the routes. `on_grant(org, principal)` runs after a grant is written: the gateway uses
     it to give an agent that was just let into its first memory the tools to use it. `workspace_of` is the
     plug routes' own rule for which workspace a call is about, so the two can't disagree. `used_by(org, caller)`
     answers {memory id: [{harness_id, name}]}: the agents the caller may see that hold a grant on each.
     `engines_running(org, workspace)` answers the engines connected there that answer now (memory_choice reads it).
-    `covers` is where memories' covers are kept (memory_plane.COVERS)."""
-    global _principal, _uhp_error, _file_bytes, _on_grant, _workspace_of, _used_by, _engines_running
+    `covers` is where memories' covers are kept (memory_plane.COVERS). `disposition(kind, name)` builds the
+    Content-Disposition header the way every other file download does."""
+    global _principal, _uhp_error, _file_bytes, _on_grant, _workspace_of, _used_by, _engines_running, _disposition
     _principal, _uhp_error, mp.GRAPH, mp.FILES, _file_bytes, _on_grant = principal, uhp_error, graph, file_meta, file_bytes, on_grant
-    _workspace_of, _used_by, _engines_running = workspace_of, used_by, engines_running
+    _workspace_of, _used_by, _engines_running, _disposition = workspace_of, used_by, engines_running, disposition
     mp.COVERS = covers
     if os.environ.get("HR_MEMORY_FIXTURE") == "1" and "fixture" not in mp.PROVIDERS:
         import memory_fixture
@@ -645,8 +647,11 @@ async def record_file(mid: str, rid: str, index: int, request: Request, as_of: s
     data = await _file_bytes(org, str(f["id"])) if _file_bytes else None
     if data is None:
         raise _uhp_error(404, "memory_record_not_found", "The file this part names is no longer kept.", "index")
+    # A response header is latin-1. Quoting the stored name here raised UnicodeEncodeError for a
+    # name the header cannot spell (a Chinese character, an emoji), and the download was a 500.
+    # The same builder the other downloads use sends an ASCII fallback plus filename*.
     return Response(content=data, media_type=f.get("media_type") or "application/octet-stream",
-                    headers={"content-disposition": f'attachment; filename="{str(f.get("name") or "file").replace(chr(34), "")}"',
+                    headers={"content-disposition": _disposition("attachment", str(f.get("name") or "file")),
                              "x-content-type-options": "nosniff"})
 
 
